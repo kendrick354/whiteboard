@@ -1,52 +1,24 @@
-//This file is only for saving the whiteboard.
-import fs from "fs";
-import config from "./config/config.js";
-import { getSafeFilePath } from "./utils.js";
-const FILE_DATABASE_FOLDER = "savedBoards";
+import DynamoDBService from './services/DynamoDBService.js';
 
 var savedBoards = {};
 var savedUndos = {};
 var saveDelay = {};
 
-if (config.backend.enableFileDatabase) {
-    // make sure that folder with saved boards exists
-    fs.mkdirSync(FILE_DATABASE_FOLDER, {
-        // this option also mutes an error if path exists
-        recursive: true,
-    });
-}
-
-/**
- * Get the file path for a whiteboard.
- * @param {string} wid Whiteboard id to get the path for
- * @returns {string} File path to the whiteboard
- * @throws {Error} if wid contains potentially unsafe directory characters
- */
-function fileDatabasePath(wid) {
-    return getSafeFilePath(FILE_DATABASE_FOLDER, wid + ".json");
-}
-
 const s_whiteboard = {
-    handleEventsAndData: function (content) {
-        var tool = content["t"]; //Tool witch is used
-        var wid = content["wid"]; //whiteboard ID
+    handleEventsAndData: async function (content) {
+        var tool = content["t"];
+        var wid = content["wid"];
         var username = content["username"];
+
         if (tool === "clear") {
-            //Clear the whiteboard
+            await DynamoDBService.deleteWhiteboardData(wid);
             delete savedBoards[wid];
             delete savedUndos[wid];
-            // delete the corresponding file too
-            fs.unlink(fileDatabasePath(wid), function (err) {
-                if (err) {
-                    return console.log(err);
-                }
-            });
         } else if (tool === "undo") {
-            //Undo an action
             if (!savedUndos[wid]) {
                 savedUndos[wid] = [];
             }
-            let savedBoard = this.loadStoredData(wid);
+            let savedBoard = await this.loadStoredData(wid);
             if (savedBoard) {
                 for (var i = savedBoards[wid].length - 1; i >= 0; i--) {
                     if (savedBoards[wid][i]["username"] == username) {
@@ -67,11 +39,12 @@ const s_whiteboard = {
                     savedUndos[wid].splice(0, savedUndos[wid].length - 1000);
                 }
             }
+            await this.saveToDB(wid);
         } else if (tool === "redo") {
             if (!savedUndos[wid]) {
                 savedUndos[wid] = [];
             }
-            let savedBoard = this.loadStoredData(wid);
+            let savedBoard = await this.loadStoredData(wid);
             for (var i = savedUndos[wid].length - 1; i >= 0; i--) {
                 if (savedUndos[wid][i]["username"] == username) {
                     var drawId = savedUndos[wid][i]["drawId"];
@@ -87,30 +60,17 @@ const s_whiteboard = {
                     break;
                 }
             }
+            await this.saveToDB(wid);
         } else if (
-            [
-                "line",
-                "pen",
-                "rect",
-                "circle",
-                "eraser",
-                "addImgBG",
-                "recSelect",
-                "eraseRec",
-                "addTextBox",
-                "setTextboxText",
-                "removeTextbox",
-                "setTextboxPosition",
-                "setTextboxFontSize",
-                "setTextboxFontColor",
-            ].includes(tool)
+            ["line", "pen", "rect", "circle", "eraser", "addImgBG", "recSelect", 
+             "eraseRec", "addTextBox", "setTextboxText", "removeTextbox", 
+             "setTextboxPosition", "setTextboxFontSize", "setTextboxFontColor"]
+            .includes(tool)
         ) {
-            let savedBoard = this.loadStoredData(wid);
-            //Save all this actions
-            delete content["wid"]; //Delete id from content so we don't store it twice
+            let savedBoard = await this.loadStoredData(wid);
+            delete content["wid"];
             if (tool === "setTextboxText") {
                 for (var i = savedBoard.length - 1; i >= 0; i--) {
-                    //Remove old textbox tex -> dont store it twice
                     if (
                         savedBoard[i]["t"] === "setTextboxText" &&
                         savedBoard[i]["d"][0] === content["d"][0]
@@ -120,53 +80,36 @@ const s_whiteboard = {
                 }
             }
             savedBoard.push(content);
+            await this.saveToDB(wid);
         }
-        this.saveToDB(wid);
     },
-    saveToDB: function (wid) {
-        if (config.backend.enableFileDatabase) {
-            //Save whiteboard to file
-            if (!saveDelay[wid]) {
-                saveDelay[wid] = true;
-                setTimeout(function () {
-                    saveDelay[wid] = false;
-                    if (savedBoards[wid]) {
-                        fs.writeFile(
-                            fileDatabasePath(wid),
-                            JSON.stringify(savedBoards[wid]),
-                            (err) => {
-                                if (err) {
-                                    return console.log(err);
-                                }
-                            }
-                        );
-                    }
-                }, 1000 * 10); //Save after 10 sec
+
+    saveToDB: async function (wid) {
+        if (savedBoards[wid]) {
+            try {
+                await DynamoDBService.saveWhiteboardData(wid, savedBoards[wid]);
+            } catch (error) {
+                console.error("Error saving to DynamoDB:", error);
             }
         }
     },
-    // Load saved whiteboard
-    loadStoredData: function (wid) {
+
+    loadStoredData: async function (wid) {
         if (wid in savedBoards) {
             return savedBoards[wid];
         }
 
-        savedBoards[wid] = [];
-
-        // try to load from DB
-        if (config.backend.enableFileDatabase) {
-            //read saved board from file
-            var filePath = fileDatabasePath(wid);
-            if (fs.existsSync(filePath)) {
-                var data = fs.readFileSync(filePath);
-                if (data) {
-                    savedBoards[wid] = JSON.parse(data);
-                }
-            }
+        try {
+            const data = await DynamoDBService.getWhiteboardData(wid);
+            savedBoards[wid] = data;
+            return data;
+        } catch (error) {
+            console.error("Error loading from DynamoDB:", error);
+            savedBoards[wid] = [];
+            return [];
         }
-
-        return savedBoards[wid];
     },
+
     copyStoredData: function (sourceWid, targetWid) {
         const sourceData = this.loadStoredData(sourceWid);
         if (sourceData.length === 0 || this.loadStoredData(targetWid).lenght > 0) {

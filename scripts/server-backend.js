@@ -73,19 +73,23 @@ export default function startBackendServer(port) {
      * @apiExample {curl} Example usage:
      *     curl -i http://[rootUrl]/api/loadwhiteboard?wid=[MyWhiteboardId]
      */
-    app.get("/api/loadwhiteboard", function (req, res) {
+    app.get("/api/loadwhiteboard", async function (req, res) {
         let query = escapeAllContentStrings(req["query"]);
         const wid = query["wid"];
-        const at = query["at"]; //accesstoken
+        const at = query["at"];
         if (accessToken === "" || accessToken == at) {
             const widForData = ReadOnlyBackendService.isReadOnly(wid)
                 ? ReadOnlyBackendService.getIdFromReadOnlyId(wid)
                 : wid;
-            const ret = s_whiteboard.loadStoredData(widForData);
-            res.send(ret);
-            res.end();
+            try {
+                const ret = await s_whiteboard.loadStoredData(widForData);
+                res.send(ret);
+                res.end();
+            } catch (error) {
+                res.status(500).send("Error loading whiteboard data");
+            }
         } else {
-            res.status(401); //Unauthorized
+            res.status(401);
             res.end();
         }
     });
